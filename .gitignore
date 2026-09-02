@@ -1,0 +1,16 @@
+# Data
+data/*.csv
+data/*.xlsx
+!data/README.md
+
+# Model artifacts
+artifacts/
+model/*.pkl
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment
+.env
