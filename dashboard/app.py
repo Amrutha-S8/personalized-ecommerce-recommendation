@@ -1,81 +1,418 @@
-import streamlit as st
-import pandas as pd
+"""
+Personalized E-Commerce Recommendation Engine — Streamlit Dashboard
+
+Run from the repo root with:
+    streamlit run dashboard/app.py
+
+This dashboard reads precomputed artifacts (produced by running the project
+notebook end-to-end). If those artifacts don't exist yet, it shows a clear
+setup screen instead of crashing or displaying fabricated numbers.
+"""
+
+import os
+import sys
 import pickle
 
-st.set_page_config(page_title="E-Commerce Recommendation Engine", layout="wide")
+import pandas as pd
+import streamlit as st
+
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+from src.recommendation import (
+    recommend_collaborative,
+    recommend_hybrid,
+    recommend_for_user,
+    explain_recommendation,
+)
+
+ARTIFACTS_DIR = os.path.join(os.path.dirname(__file__), "..", "artifacts")
+
+# ---------------------------------------------------------------------------
+# Page config + light custom styling
+# ---------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="Personalized Recommendation Engine",
+    page_icon="🛍️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+    .block-container { padding-top: 2rem; }
+    .kpi-card {
+        background: #ffffff;
+        border: 1px solid #e6e6e6;
+        border-radius: 12px;
+        padding: 1.1rem 1.2rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .kpi-label { font-size: 0.85rem; color: #6b7280; margin-bottom: 0.2rem; }
+    .kpi-value { font-size: 1.6rem; font-weight: 700; color: #111827; }
+    .rec-card {
+        background: #ffffff;
+        border: 1px solid #e6e6e6;
+        border-radius: 14px;
+        padding: 1.1rem 1.3rem;
+        margin-bottom: 0.9rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .rec-rank { font-size: 1.3rem; font-weight: 700; color: #111827; }
+    .rec-title { font-size: 1.05rem; font-weight: 600; margin: 0.2rem 0 0.3rem 0; }
+    .rec-explain { font-size: 0.88rem; color: #6b7280; font-style: italic; }
+    .rec-score-badge {
+        display: inline-block;
+        background: #eef2ff;
+        color: #4338ca;
+        border-radius: 999px;
+        padding: 0.15rem 0.7rem;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-top: 0.4rem;
+    }
+    .method-badge {
+        display: inline-block;
+        background: #f0fdf4;
+        color: #15803d;
+        border-radius: 999px;
+        padding: 0.15rem 0.7rem;
+        font-size: 0.78rem;
+        margin-left: 0.4rem;
+    }
+    .setup-box {
+        background: #fffbeb;
+        border: 1px solid #fde68a;
+        border-radius: 12px;
+        padding: 1.2rem 1.4rem;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 
-@st.cache_data
-def load_data():
-    train_df = pd.read_csv("artifacts/train_df.csv")
-    popularity_df = pd.read_csv("artifacts/popularity_df.csv")
-    product_catalog = pd.read_csv("artifacts/product_catalog.csv")
-    comparison_df = pd.read_csv("artifacts/comparison_df.csv")
-    with open("artifacts/user_item_matrix.pkl", "rb") as f:
-        user_item_matrix = pickle.load(f)
-    with open("artifacts/item_similarity_df.pkl", "rb") as f:
-        item_similarity_df = pickle.load(f)
-    return train_df, popularity_df, product_catalog, comparison_df, user_item_matrix, item_similarity_df
+# ---------------------------------------------------------------------------
+# Data loading — cached, and tolerant of missing artifacts
+# ---------------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def load_artifacts():
+    required = {
+        "train_df": "train_df.csv",
+        "popularity_df": "popularity_df.csv",
+        "product_catalog": "product_catalog.csv",
+    }
+    optional = {
+        "comparison_df": "comparison_df.csv",
+    }
+    pickles = {
+        "user_item_matrix": "user_item_matrix.pkl",
+        "item_similarity_df": "item_similarity_df.pkl",
+        "content_similarity": "content_similarity.pkl",
+        "product_index_map": "product_index_map.pkl",
+    }
+
+    missing = []
+    data = {}
+
+    for key, fname in required.items():
+        path = os.path.join(ARTIFACTS_DIR, fname)
+        if not os.path.exists(path):
+            missing.append(fname)
+        else:
+            data[key] = pd.read_csv(path)
+
+    for key, fname in optional.items():
+        path = os.path.join(ARTIFACTS_DIR, fname)
+        data[key] = pd.read_csv(path) if os.path.exists(path) else None
+
+    for key, fname in pickles.items():
+        path = os.path.join(ARTIFACTS_DIR, fname)
+        if not os.path.exists(path):
+            missing.append(fname)
+        else:
+            with open(path, "rb") as f:
+                data[key] = pickle.load(f)
+
+    return data, missing
 
 
-train_df, popularity_df, product_catalog, comparison_df, user_item_matrix, item_similarity_df = load_data()
+data, missing_files = load_artifacts()
 
 
-def recommend_collaborative(user_id, n=10):
-    if user_id not in user_item_matrix.index:
-        return pd.DataFrame(columns=["StockCode", "Description", "Score"])
-    user_row = user_item_matrix.loc[user_id]
-    user_products = user_row[user_row > 0].index.tolist()
-    if len(user_products) == 0:
-        return pd.DataFrame(columns=["StockCode", "Description", "Score"])
-    scores = pd.Series(dtype=float)
-    for product in user_products:
-        scores = scores.add(item_similarity_df[product] * user_row[product], fill_value=0)
-    scores = scores.drop(labels=user_products, errors="ignore")
-    top_n = scores.sort_values(ascending=False).head(n)
-    result = pd.DataFrame({"StockCode": top_n.index, "Score": top_n.values})
-    result = result.merge(train_df[["StockCode", "Description"]].drop_duplicates(), on="StockCode", how="left")
-    return result[["StockCode", "Description", "Score"]].reset_index(drop=True)
+def setup_required_screen():
+    st.markdown("## 🛍️ Personalized Recommendation Engine")
+    st.markdown("##### AI-powered product discovery using customer purchase behavior")
+    st.markdown(
+        """
+        <div class="setup-box">
+        <b>Setup required.</b> This dashboard reads precomputed artifacts generated by the
+        project notebook, and the following files aren't present yet in <code>artifacts/</code>:
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("")
+    for f in missing_files:
+        st.markdown(f"- `artifacts/{f}`")
+    st.markdown("")
+    st.info(
+        "Run the notebook in `notebooks/` end-to-end (Steps 1–17), which saves these files "
+        "to `artifacts/`, then restart this dashboard. No demo or placeholder data is shown "
+        "here on purpose — every number in this app is meant to come from real computation, "
+        "not be invented."
+    )
+    st.stop()
 
 
-st.title("Personalized E-Commerce Recommendation Engine")
+if missing_files:
+    setup_required_screen()
 
-st.sidebar.header("KPIs")
-st.sidebar.metric("Total Users", train_df["CustomerID"].nunique())
-st.sidebar.metric("Total Products", train_df["StockCode"].nunique())
-st.sidebar.metric("Total Interactions", len(train_df))
-best_row = comparison_df.loc[comparison_df["NDCG@10"].idxmax()]
-st.sidebar.metric("Best Model Precision@10", f'{best_row["Precision@10"]:.3f}')
-st.sidebar.metric("Best Model Recall@10", f'{best_row["Recall@10"]:.3f}')
-st.sidebar.metric("Best Model NDCG@10", f'{best_row["NDCG@10"]:.3f}')
+train_df = data["train_df"]
+popularity_df = data["popularity_df"]
+product_catalog = data["product_catalog"]
+comparison_df = data["comparison_df"]  # may be None
+user_item_matrix = data["user_item_matrix"]
+item_similarity_df = data["item_similarity_df"]
+content_similarity = data["content_similarity"]
+product_index_map = data["product_index_map"]
 
-user_ids = sorted(user_item_matrix.index.tolist())
-selected_user = st.selectbox("Select Customer", user_ids)
 
-user_data = train_df[train_df["CustomerID"] == selected_user]
+# ---------------------------------------------------------------------------
+# Sidebar navigation
+# ---------------------------------------------------------------------------
 
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("Customer Profile")
-    st.write(f"User ID: {selected_user}")
-    st.write(f"Number of previous interactions: {len(user_data)}")
-    st.write(f"Distinct products purchased: {user_data['StockCode'].nunique()}")
+st.sidebar.markdown("## 🛍️ Recommendation Engine")
+page = st.sidebar.radio(
+    "Navigate",
+    ["🏠 Overview", "👤 Customer Explorer", "🛍️ Recommendations",
+     "📊 Model Performance", "📈 Customer Insights", "ℹ️ About"],
+    label_visibility="collapsed",
+)
 
-with col2:
-    st.subheader("Previously Interacted Products")
-    st.dataframe(
-        user_data[["StockCode", "Description", "InteractionScore_capped"]]
-        .sort_values("InteractionScore_capped", ascending=False)
-        .head(10)
+st.sidebar.markdown("---")
+st.sidebar.caption("Data: UCI Online Retail Dataset")
+
+
+def kpi_card(col, label, value):
+    col.markdown(
+        f'<div class="kpi-card"><div class="kpi-label">{label}</div>'
+        f'<div class="kpi-value">{value}</div></div>',
+        unsafe_allow_html=True,
     )
 
-st.subheader("Recommended Products")
-recs = recommend_collaborative(selected_user, n=10)
-recs["Method"] = "Collaborative Filtering"
-st.dataframe(recs)
 
-st.subheader("Model Comparison")
-st.dataframe(comparison_df)
+# ---------------------------------------------------------------------------
+# PAGE: Overview
+# ---------------------------------------------------------------------------
 
-st.subheader("Top Popular Products")
-st.bar_chart(popularity_df.head(10).set_index("Description")["PopularityScore"])
+if page == "🏠 Overview":
+    st.markdown("# 🛍️ Personalized Recommendation Engine")
+    st.markdown("##### AI-powered product discovery using customer purchase behavior")
+    st.markdown("")
+
+    n_customers = train_df["CustomerID"].nunique()
+    n_transactions = train_df["InvoiceNo"].nunique() if "InvoiceNo" in train_df.columns else len(train_df)
+    n_products = train_df["StockCode"].nunique()
+    n_models = 4
+    best_score = "Unavailable"
+    if comparison_df is not None and "NDCG@10" in comparison_df.columns:
+        best_score = f'{comparison_df["NDCG@10"].max():.3f} NDCG@10'
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    kpi_card(c1, "👥 Customers", f"{n_customers:,}")
+    kpi_card(c2, "🛒 Transactions", f"{n_transactions:,}")
+    kpi_card(c3, "📦 Products", f"{n_products:,}")
+    kpi_card(c4, "🎯 Models", n_models)
+    kpi_card(c5, "📈 Best Model Score", best_score)
+
+    st.markdown("")
+    st.markdown("### How this system works")
+    st.markdown(
+        """
+        This engine blends four recommendation strategies — a popularity baseline,
+        collaborative filtering (based on similar customers), content-based filtering
+        (based on similar products), and a hybrid of the two — then routes each
+        customer to the right strategy depending on how much purchase history they have.
+        """
+    )
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("#### Top-selling products")
+        top_products = (
+            train_df.groupby("Description")["Quantity"].sum()
+            .sort_values(ascending=False).head(10)
+        )
+        st.bar_chart(top_products)
+    with right:
+        st.markdown("#### Transactions over time")
+        if "InvoiceDate" in train_df.columns:
+            ts = train_df.copy()
+            ts["InvoiceDate"] = pd.to_datetime(ts["InvoiceDate"])
+            monthly = ts.groupby(ts["InvoiceDate"].dt.to_period("M"))["InvoiceNo"].nunique()
+            monthly.index = monthly.index.astype(str)
+            st.line_chart(monthly)
+        else:
+            st.caption("InvoiceDate not available in train_df.")
+
+
+# ---------------------------------------------------------------------------
+# PAGE: Customer Explorer
+# ---------------------------------------------------------------------------
+
+elif page == "👤 Customer Explorer":
+    st.markdown("## 👤 Customer Explorer")
+
+    customer_ids = sorted(user_item_matrix.index.tolist())
+    selected_customer = st.selectbox("Select a customer", customer_ids)
+
+    cust_data = train_df[train_df["CustomerID"] == selected_customer].copy()
+
+    st.markdown("### Customer Profile")
+    c1, c2, c3, c4 = st.columns(4)
+    kpi_card(c1, "Customer ID", selected_customer)
+    country = cust_data["Country"].mode()[0] if "Country" in cust_data.columns and len(cust_data) else "N/A"
+    kpi_card(c2, "Country", country)
+    kpi_card(c3, "Purchases", len(cust_data))
+    kpi_card(c4, "Unique Products", cust_data["StockCode"].nunique())
+
+    if "UnitPrice" in cust_data.columns and "Quantity" in cust_data.columns:
+        cust_data["TotalValue"] = cust_data["Quantity"] * cust_data["UnitPrice"]
+        st.markdown(f"**Total spending:** £{cust_data['TotalValue'].sum():,.2f}")
+    if "InvoiceDate" in cust_data.columns and len(cust_data):
+        last_date = pd.to_datetime(cust_data["InvoiceDate"]).max()
+        st.markdown(f"**Last purchase date:** {last_date.date()}")
+
+    st.markdown("### Purchase History")
+    display_cols = [c for c in ["StockCode", "Description", "Quantity", "InvoiceDate", "UnitPrice"]
+                     if c in cust_data.columns]
+    hist = cust_data[display_cols].copy()
+    if "InvoiceDate" in hist.columns:
+        hist = hist.sort_values("InvoiceDate", ascending=False)
+    if "Quantity" in hist.columns and "UnitPrice" in hist.columns:
+        hist["Total Value"] = hist["Quantity"] * hist["UnitPrice"]
+    st.dataframe(hist.head(20), use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# PAGE: Recommendations
+# ---------------------------------------------------------------------------
+
+elif page == "🛍️ Recommendations":
+    st.markdown("## ✨ Recommended For You")
+
+    customer_ids = sorted(user_item_matrix.index.tolist())
+    selected_customer = st.selectbox("Select a customer", customer_ids, key="rec_customer")
+    n_recs = st.slider("Number of recommendations", 3, 15, 5)
+
+    with st.spinner("Generating recommendations..."):
+        recs = recommend_for_user(
+            selected_customer, user_item_matrix, item_similarity_df, product_index_map,
+            product_catalog, content_similarity, train_df, popularity_df, n=n_recs,
+        )
+
+    if recs.empty:
+        st.warning("No recommendations could be generated for this customer.")
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        score_col = "HybridScore" if "HybridScore" in recs.columns else "Score"
+        for i, row in recs.reset_index(drop=True).iterrows():
+            rank_icon = medals[i] if i < 3 else f"#{i+1}"
+            method = row.get("Method", "Hybrid")
+            explanation = explain_recommendation(method)
+            score_val = row[score_col] if score_col in row else 0.0
+
+            st.markdown(
+                f"""
+                <div class="rec-card">
+                    <span class="rec-rank">{rank_icon}</span>
+                    <div class="rec-title">{row.get('Description', 'Unknown product')}</div>
+                    <div class="rec-explain">{explanation}</div>
+                    <span class="rec-score-badge">Score: {score_val:.3f}</span>
+                    <span class="method-badge">{method}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+# ---------------------------------------------------------------------------
+# PAGE: Model Performance
+# ---------------------------------------------------------------------------
+
+elif page == "📊 Model Performance":
+    st.markdown("## 📊 Model Performance")
+
+    if comparison_df is None:
+        st.markdown(
+            """
+            <div class="setup-box">
+            <b>Metrics unavailable.</b> <code>artifacts/comparison_df.csv</code> hasn't been
+            generated yet. Run the evaluation stage of the notebook (Precision@K / Recall@K / NDCG@K)
+            to produce it — no placeholder numbers are shown here.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        best_metric = "NDCG@10" if "NDCG@10" in comparison_df.columns else comparison_df.columns[-1]
+        best_model = comparison_df.loc[comparison_df[best_metric].idxmax(), "Model"]
+
+        def highlight_best(row):
+            return ["background-color: #f0fdf4" if row["Model"] == best_model else "" for _ in row]
+
+        st.markdown(f"**Best performing model (by {best_metric}):** 🏆 {best_model}")
+        st.dataframe(comparison_df.style.apply(highlight_best, axis=1), use_container_width=True, hide_index=True)
+
+        metric_cols = [c for c in comparison_df.columns if c != "Model"]
+        chosen_metric = st.selectbox("Compare models on:", metric_cols)
+        st.bar_chart(comparison_df.set_index("Model")[chosen_metric])
+
+
+# ---------------------------------------------------------------------------
+# PAGE: Customer Insights
+# ---------------------------------------------------------------------------
+
+elif page == "📈 Customer Insights":
+    st.markdown("## 📈 Customer Insights")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Purchases per customer (distribution)")
+        counts = train_df.groupby("CustomerID")["StockCode"].nunique()
+        st.bar_chart(counts.value_counts().sort_index().head(30))
+    with c2:
+        if "Country" in train_df.columns:
+            st.markdown("#### Top countries by transaction volume")
+            top_countries = train_df.groupby("Country")["Quantity"].sum().sort_values(ascending=False).head(10)
+            st.bar_chart(top_countries)
+        else:
+            st.caption("Country column not available.")
+
+    st.markdown("#### Product popularity (reach vs. volume)")
+    if {"NumUniqueUsers", "TotalInteractionScore"}.issubset(popularity_df.columns):
+        st.scatter_chart(popularity_df.head(200), x="TotalInteractionScore", y="NumUniqueUsers")
+    else:
+        st.caption("Popularity breakdown columns not available in popularity_df.")
+
+
+# ---------------------------------------------------------------------------
+# PAGE: About
+# ---------------------------------------------------------------------------
+
+elif page == "ℹ️ About":
+    st.markdown("## ℹ️ About this project")
+    st.markdown(
+        """
+        **Personalized E-Commerce Recommendation & Ranking Engine**
+
+        An end-to-end recommendation system built on real UK online-retailer
+        transaction data (UCI Online Retail Dataset), combining popularity,
+        collaborative filtering, content-based filtering, and a hybrid model —
+        with time-aware evaluation and cold-start handling.
+
+        Built by **Amrutha S.** — Computer Science Engineering, Data Science.
+
+        [GitHub](https://github.com/Amrutha-S8) ·
+        [Repository](https://github.com/Amrutha-S8/personalized-ecommerce-recommendation)
+        """
+    )

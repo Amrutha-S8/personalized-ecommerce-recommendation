@@ -225,3 +225,28 @@ def ndcg_at_k(recommended, relevant, k):
     ideal_hits = min(len(relevant), k)
     idcg = sum(1 / math.log2(i + 2) for i in range(ideal_hits))
     return dcg / idcg if idcg > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Recommendation explanations (used by the dashboard to make results legible
+# to a non-technical viewer, instead of showing raw scores with no context)
+# ---------------------------------------------------------------------------
+
+def explain_recommendation(method, collab_weight=0.6, content_weight=0.4):
+    """
+    Returns a short, human-readable reason for a recommendation, based on
+    which method produced it. Used purely for UI presentation — it does not
+    change any scoring logic.
+    """
+    method = (method or "").lower()
+
+    if "hybrid" in method:
+        return (f"Hybrid pick: {int(collab_weight * 100)}% based on customers with similar "
+                f"purchase patterns, {int(content_weight * 100)}% based on product similarity.")
+    if "collaborative" in method:
+        return "Customers with similar purchase behavior also bought this."
+    if "content" in method:
+        return "Similar to products you've previously purchased, based on product description."
+    if "popular" in method or "cold" in method:
+        return "One of the most popular products overall — shown because we don't have enough purchase history for this customer yet."
+    return "Recommended based on your purchase history."
